@@ -1,0 +1,35 @@
+
+PUBLISHER
+
+conda activate c1thesis
+cd Documents/C1_THESIS/SO34
+colcon build --packages-select MEx3
+export ROS_DOMAIN_ID=27
+source install/setup.bash
+ros2 run MEx3 image_publisher
+
+conda activate c1thesis
+cd Documents/C1_THESIS/SO34
+export ROS_DOMAIN_ID=27
+source install/setup.bash
+ros2 run MEx3 image_publisher
+___________________________________________________________________________
+
+SUBSCRIBER
+
+conda activate c1thesis
+export PYTHONPATH="$CONDA_PREFIX/lib/python3.10/site-packages:$PYTHONPATH"
+cd Documents/C1_THESIS/SO34
+colcon build --packages-select MEx3
+export ROS_DOMAIN_ID=27
+source install/setup.bash
+ros2 run MEx3 gazzard_gui_v2
+
+conda activate c1thesis
+export PYTHONPATH="$CONDA_PREFIX/lib/python3.10/site-packages:$PYTHONPATH"
+cd Documents/C1_THESIS/SO34
+export ROS_DOMAIN_ID=27
+source install/setup.bash
+ros2 run MEx3 gazzard_gui_v2
+
+

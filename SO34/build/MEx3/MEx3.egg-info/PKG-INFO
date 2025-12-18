@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: MEx3
+Version: 0.0.0
+Summary: Image publisher and image subscriber for MEx3
+Maintainer: madee
+Maintainer-email: mspangaliman@up.edu.ph
+License: MIT
+Requires-Dist: setuptools
+Dynamic: license
+Dynamic: maintainer
+Dynamic: maintainer-email
+Dynamic: requires-dist
+Dynamic: summary

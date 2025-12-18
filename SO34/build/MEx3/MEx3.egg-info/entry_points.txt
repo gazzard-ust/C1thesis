@@ -1,0 +1,8 @@
+[console_scripts]
+crack_image_publisher = MEx3.crack_image_publisher:main
+fake_co2_publisher = MEx3.fake_co2_publisher:main
+gazzard_gui = MEx3.gazzard_gui:main
+gazzard_gui_sam3 = MEx3.gazzard_gui_sam3:main
+gazzard_gui_v2 = MEx3.gazzard_gui_v2:main
+image_publisher = MEx3.image_publisher:main
+image_subscriber = MEx3.image_subscriber:main
