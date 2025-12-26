@@ -15,6 +15,38 @@ from ultralytics import YOLOWorld
 from transformers import pipeline
 from PIL import Image
 import time
+import os
+
+# ============================================
+# CONFIGURATION - MODIFY THESE AS NEEDED
+# ============================================
+
+# Fine-tuned YOLO-World XL model path
+# Trained on crack detection dataset: mAP@50-95: 0.8692 | mAP@50: 0.9841
+MODEL_PATH = "best.pt"
+
+# Fine-tuned classes (must match training exactly)
+CRACK_CLASSES = [
+    "Dummy crack",
+    "Paper crack",
+    "PVC pipe crack",
+]
+
+# Detection settings
+DETECTION_CONFIDENCE = 0.25  # Confidence threshold (0.25 for fine-tuned model)
+IOU_THRESHOLD = 0.45
+
+# Depth estimation model
+DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
+
+# Robot safety parameters (in cm)
+STOPPING_DISTANCE_CM = 30.0
+EMERGENCY_STOP_CM = 20.0
+MIN_SAFE_DISTANCE_CM = 15.0
+
+# ============================================
+# END CONFIGURATION
+# ============================================
 
 app = FastAPI()
 node = None  # Global node
@@ -34,10 +66,10 @@ class ImageSubscriber(Node):
         self.last_target_x = None
         self.last_target_y = None
 
-        # DETECTION PARAMETERS - OPTIMIZED FOR IRREGULAR CRACK SHAPES
+        # DETECTION PARAMETERS - OPTIMIZED FOR FINE-TUNED MODEL
         self.target_lost_frames = 0
-        self.detection_confidence_threshold = 0.001  # VERY LOW for testing - will accept almost anything
-        self.min_detection_frames = 1  # Accept detection immediately for testing
+        self.detection_confidence_threshold = DETECTION_CONFIDENCE  # Use config value
+        self.min_detection_frames = 1  # Accept detection immediately
         self.current_detection_count = 0  # Track consecutive detections
         self.detection_memory_frames = 60  # Remember detection for this many frames
         self.last_known_direction = 0
@@ -65,10 +97,10 @@ class ImageSubscriber(Node):
         self.linear_speed = 0.0
         self.angular_speed = 0.0
 
-        # CRITICAL SAFETY PARAMETERS - ADJUSTED FOR COLLISION PREVENTION
-        self.stopping_distance = 30.0  # 30cm for earlier stopping
-        self.emergency_stop_distance = 20.0  # Emergency stop if object is closer than this
-        self.min_safe_distance = 15.0  # cm
+        # CRITICAL SAFETY PARAMETERS - FROM CONFIG
+        self.stopping_distance = STOPPING_DISTANCE_CM
+        self.emergency_stop_distance = EMERGENCY_STOP_CM
+        self.min_safe_distance = MIN_SAFE_DISTANCE_CM
         self.emergency_stop = False
         
         # Centering parameters
@@ -175,8 +207,9 @@ class ImageSubscriber(Node):
         self.map50_history = []       # Track mAP50 over time
         self.iou_thresholds = [0.5 + 0.05 * i for i in range(10)]  # 0.5, 0.55, ..., 0.95
 
-        self.get_logger().info("🔒 Safety parameters: stopping_distance=30.0cm, emergency_stop_distance=20.0cm")
-        self.get_logger().info("⏳ Robot initialized in stopped state - waiting for target to be set")
+        self.get_logger().info(f"🔒 Safety: stopping={STOPPING_DISTANCE_CM}cm, emergency={EMERGENCY_STOP_CM}cm")
+        self.get_logger().info(f"🎯 Detection confidence: {DETECTION_CONFIDENCE}")
+        self.get_logger().info("⏳ Robot initialized - waiting for target")
 
     def initialize_360_search(self):
         """Initialize an immediate 360-degree search pattern"""
@@ -201,24 +234,27 @@ class ImageSubscriber(Node):
 
     def initialize_models(self):
         self.get_logger().info("🚀 Initializing Models...")
-        self.model = YOLOWorld("yolov8x-world.pt")
+        
+        # ============================================
+        # FINE-TUNED YOLO-WORLD XL MODEL
+        # ============================================
+        if not os.path.exists(MODEL_PATH):
+            self.get_logger().error(f"❌ Model not found: {MODEL_PATH}")
+            self.get_logger().error("Please ensure best.pt is in the same directory")
+            raise FileNotFoundError(f"Model not found: {MODEL_PATH}")
+        
+        self.get_logger().info(f"📦 Loading fine-tuned model: {MODEL_PATH}")
+        self.model = YOLOWorld(MODEL_PATH)
 
-        # Crack detection - detecting blue/colored segmented objects
-        # YOLO-World open-vocabulary detection with descriptive prompts
-        # These prompts match the 3D segmented crack visualizations (blue blob shapes)
-        crack_hole_scratch_descriptions = [
-            "slit-damage",
-            "cut-open-damage",
-            "elongated-slit",
-            "linear-surface-tear",
-            "rectangular-cut",
-        ]
+        # Set fine-tuned classes (must match training exactly)
+        self.model.set_classes(CRACK_CLASSES)
+        self.get_logger().info(f"✅ YOLO-World XL loaded with classes: {CRACK_CLASSES}")
+        
+        # Depth estimation model
+        self.get_logger().info(f"📦 Loading depth model: {DEPTH_MODEL}")
 
-        self.model.set_classes(crack_hole_scratch_descriptions)
-        self.get_logger().info(f"✅ YOLO-World configured to detect: {len(crack_hole_scratch_descriptions)} crack-related classes")
-
-        self.depth_pipe = pipeline(task="depth-estimation", model="depth-anything/Depth-Anything-V2-Small-hf")
-        self.get_logger().info("✅ Models Loaded!")
+        self.depth_pipe = pipeline(task="depth-estimation", model=DEPTH_MODEL)
+        self.get_logger().info("✅ All Models Loaded Successfully!")
 
     def initialize_publishers(self):
         qos = QoSProfile(
@@ -517,27 +553,27 @@ class ImageSubscriber(Node):
 
                 # ONLY match if we have a specific target object name
                 if target_object and target_object.strip():
-                    # More flexible matching
+                    # Target matching for fine-tuned crack detection model
                     target_name = target_object.lower()
                     label_lower = label.lower()
 
                     # Direct match
                     if target_name == label_lower:
                         is_target = True
-                    # Partial match (bottle in water bottle)
+                    # Partial match (e.g., "crack" matches "Dummy crack")
                     elif target_name in label_lower:
                         is_target = True
-                    # Common substitutions
+                    # Match any fine-tuned crack class when target is "crack"
+                    elif target_name == "crack" and any(crack_class.lower() in label_lower for crack_class in CRACK_CLASSES):
+                        is_target = True
+                    # Common substitutions for other objects
                     elif target_name == "bottle" and any(word in label_lower for word in ["container", "flask", "jar"]):
                         is_target = True
-                    # Crack-related damage labels - all these should match when target is "crack"
+                    # Fallback: Legacy crack-related terms (for edge detection fallback)
                     elif target_name == "crack" and any(word in label_lower for word in [
-                        "slit", "damage", "cut", "tear", "elongated", "linear", "rectangular",
-                        "crack", "fracture", "fissure", "split"
+                        "slit", "damage", "cut", "tear", "crack", "fracture"
                     ]):
                         is_target = True
-                        # Relabel as "crack" for consistency
-                        label = "crack"
 
                 # GEOMETRIC FILTERING FOR CRACK DETECTION
                 # Apply filters when target is "crack" to reduce false positives
@@ -1701,9 +1737,9 @@ async def reset_target():
     
     # Try to reset YOLOWorld model's classes if possible
     try:
-        # Reset to default classes
-        node.model.set_classes(["crack"])
-        node.get_logger().info("Reset detection model classes to defaults")
+        # Reset to fine-tuned classes from config
+        node.model.set_classes(CRACK_CLASSES)
+        node.get_logger().info(f"Reset detection model to fine-tuned classes: {CRACK_CLASSES}")
     except Exception as e:
         node.get_logger().warning(f"Could not reset model classes: {e}")
     
