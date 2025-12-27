@@ -160,6 +160,14 @@ class GasGuidedCrackDetector(Node):
         self.depth_inference_time = 0.0
         self.total_inference_time = 0.0
         
+        # Inference speed statistics (for benchmark/thesis)
+        self.yolo_times = deque(maxlen=500)
+        self.depth_times = deque(maxlen=500)
+        self.total_times = deque(maxlen=500)
+        self.fps_history = deque(maxlen=100)
+        self.benchmark_start_time = None
+        self.frames_processed = 0
+        
         # Camera parameters
         self.frame_width = 640
         self.frame_center = self.frame_width // 2
@@ -621,6 +629,18 @@ class GasGuidedCrackDetector(Node):
                 
                 self.total_inference_time = self.yolo_inference_time + self.depth_inference_time
                 
+                # Record statistics for benchmark
+                self.yolo_times.append(self.yolo_inference_time * 1000)
+                self.depth_times.append(self.depth_inference_time * 1000)
+                self.total_times.append(self.total_inference_time * 1000)
+                self.frames_processed += 1
+                
+                if self.total_inference_time > 0:
+                    self.fps_history.append(1.0 / self.total_inference_time)
+                
+                if self.benchmark_start_time is None:
+                    self.benchmark_start_time = time.time()
+                
         except Exception as e:
             self.get_logger().error(f"❌ Image Processing Error: {e}")
 
@@ -915,6 +935,174 @@ async def recalibrate_co2():
         node.calibration_readings = []
         node.state = RobotState.CALIBRATING
         return {"message": f"Recalibrating CO2 baseline for {CALIBRATION_DURATION}s"}
+    return {"message": "Node not initialized"}
+
+
+# ============================================
+# BENCHMARK ENDPOINTS (for thesis/paper)
+# ============================================
+
+@app.get("/benchmark")
+async def get_benchmark_results():
+    """
+    Get comprehensive inference speed benchmark results.
+    
+    USE THIS FOR YOUR THESIS - provides:
+    - Mean, Std, Min, Max, Median for each component
+    - Ready-to-cite format: "XX.XX ± YY.YY ms"
+    
+    Run system for 30-60 seconds before calling this endpoint.
+    """
+    if node and len(node.yolo_times) > 0:
+        # Calculate YOLO statistics
+        yolo_times = list(node.yolo_times)
+        yolo_mean = np.mean(yolo_times)
+        yolo_std = np.std(yolo_times)
+        yolo_min = np.min(yolo_times)
+        yolo_max = np.max(yolo_times)
+        yolo_median = np.median(yolo_times)
+        
+        # Calculate Depth statistics
+        depth_times = list(node.depth_times)
+        depth_mean = np.mean(depth_times)
+        depth_std = np.std(depth_times)
+        depth_min = np.min(depth_times)
+        depth_max = np.max(depth_times)
+        depth_median = np.median(depth_times)
+        
+        # Calculate Total statistics
+        total_times = list(node.total_times)
+        total_mean = np.mean(total_times)
+        total_std = np.std(total_times)
+        total_min = np.min(total_times)
+        total_max = np.max(total_times)
+        total_median = np.median(total_times)
+        
+        # Calculate FPS statistics
+        fps_list = list(node.fps_history)
+        fps_mean = np.mean(fps_list) if fps_list else 0
+        fps_std = np.std(fps_list) if fps_list else 0
+        fps_min = np.min(fps_list) if fps_list else 0
+        fps_max = np.max(fps_list) if fps_list else 0
+        
+        # Calculate elapsed time
+        elapsed = time.time() - node.benchmark_start_time if node.benchmark_start_time else 0
+        
+        return {
+            "benchmark_info": {
+                "frames_processed": node.frames_processed,
+                "elapsed_time_sec": round(elapsed, 2),
+                "samples_collected": len(yolo_times),
+                "device": node.device,
+                "model": MODEL_PATH,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            },
+            "yolo_world_xl_ms": {
+                "mean": round(yolo_mean, 2),
+                "std": round(yolo_std, 2),
+                "min": round(yolo_min, 2),
+                "max": round(yolo_max, 2),
+                "median": round(yolo_median, 2)
+            },
+            "depth_anything_v2_ms": {
+                "mean": round(depth_mean, 2),
+                "std": round(depth_std, 2),
+                "min": round(depth_min, 2),
+                "max": round(depth_max, 2),
+                "median": round(depth_median, 2)
+            },
+            "total_pipeline_ms": {
+                "mean": round(total_mean, 2),
+                "std": round(total_std, 2),
+                "min": round(total_min, 2),
+                "max": round(total_max, 2),
+                "median": round(total_median, 2)
+            },
+            "fps": {
+                "mean": round(fps_mean, 2),
+                "std": round(fps_std, 2),
+                "min": round(fps_min, 2),
+                "max": round(fps_max, 2)
+            },
+            "for_thesis": {
+                "yolo_world_xl": f"{yolo_mean:.2f} ± {yolo_std:.2f} ms",
+                "depth_anything_v2": f"{depth_mean:.2f} ± {depth_std:.2f} ms",
+                "total_pipeline": f"{total_mean:.2f} ± {total_std:.2f} ms",
+                "throughput": f"{fps_mean:.2f} ± {fps_std:.2f} FPS"
+            }
+        }
+    return {"message": "No benchmark data yet. Run the system for a few seconds first."}
+
+
+@app.get("/benchmark/save")
+async def save_benchmark_results():
+    """
+    Save benchmark results to a JSON file.
+    File saved as: inference_benchmark_YYYYMMDD_HHMMSS.json
+    """
+    import json
+    
+    if node and len(node.yolo_times) > 0:
+        yolo_times = list(node.yolo_times)
+        depth_times = list(node.depth_times)
+        total_times = list(node.total_times)
+        fps_list = list(node.fps_history)
+        
+        results = {
+            "benchmark_info": {
+                "frames_processed": node.frames_processed,
+                "elapsed_time_sec": round(time.time() - node.benchmark_start_time, 2) if node.benchmark_start_time else 0,
+                "samples_collected": len(yolo_times),
+                "device": node.device,
+                "model": MODEL_PATH,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            },
+            "yolo_world_xl_ms": {
+                "mean": round(float(np.mean(yolo_times)), 2),
+                "std": round(float(np.std(yolo_times)), 2),
+                "min": round(float(np.min(yolo_times)), 2),
+                "max": round(float(np.max(yolo_times)), 2),
+                "median": round(float(np.median(yolo_times)), 2)
+            },
+            "depth_anything_v2_ms": {
+                "mean": round(float(np.mean(depth_times)), 2),
+                "std": round(float(np.std(depth_times)), 2),
+                "min": round(float(np.min(depth_times)), 2),
+                "max": round(float(np.max(depth_times)), 2),
+                "median": round(float(np.median(depth_times)), 2)
+            },
+            "total_pipeline_ms": {
+                "mean": round(float(np.mean(total_times)), 2),
+                "std": round(float(np.std(total_times)), 2),
+                "min": round(float(np.min(total_times)), 2),
+                "max": round(float(np.max(total_times)), 2),
+                "median": round(float(np.median(total_times)), 2)
+            },
+            "fps": {
+                "mean": round(float(np.mean(fps_list)), 2) if fps_list else 0,
+                "std": round(float(np.std(fps_list)), 2) if fps_list else 0
+            }
+        }
+        
+        filename = f"inference_benchmark_{time.strftime('%Y%m%d_%H%M%S')}.json"
+        with open(filename, 'w') as f:
+            json.dump(results, f, indent=4)
+        
+        return {"message": f"Saved to {filename}", "results": results}
+    return {"message": "No benchmark data yet."}
+
+
+@app.get("/benchmark/reset")
+async def reset_benchmark():
+    """Reset benchmark statistics to start fresh measurement."""
+    if node:
+        node.yolo_times.clear()
+        node.depth_times.clear()
+        node.total_times.clear()
+        node.fps_history.clear()
+        node.frames_processed = 0
+        node.benchmark_start_time = time.time()
+        return {"message": "Benchmark reset. Statistics cleared."}
     return {"message": "Node not initialized"}
 
 
