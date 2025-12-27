@@ -168,6 +168,32 @@ class GasGuidedCrackDetector(Node):
         self.benchmark_start_time = None
         self.frames_processed = 0
         
+        # ============================================
+        # EXPECTED OUTPUT METRICS (for thesis)
+        # ============================================
+        
+        # E.O. 4.1: Leak source identification accuracy
+        self.total_detection_attempts = 0      # Total times we tried to confirm
+        self.successful_confirmations = 0      # Times both CO2 + crack agreed
+        self.false_positives = 0               # Crack without high CO2
+        self.false_negatives = 0               # High CO2 without crack
+        
+        # E.O. 4.2: Distance estimation
+        self.distance_estimates = deque(maxlen=500)  # Estimated distances
+        self.actual_stopping_distance = None          # Final distance when stopped
+        
+        # E.O. 4.3: Speed tracking during approach
+        self.approach_speeds = deque(maxlen=500)     # (linear, angular) tuples
+        self.max_linear_speed_used = 0.0
+        self.max_angular_speed_used = 0.0
+        self.approach_start_time = None
+        self.approach_duration = 0.0
+        
+        # E.O. 4.4: Alignment/deviation tracking
+        self.centering_errors = deque(maxlen=500)    # Pixel errors from center
+        self.alignment_attempts = 0
+        self.successful_alignments = 0               # Times we achieved centering
+        
         # Camera parameters
         self.frame_width = 640
         self.frame_center = self.frame_width // 2
@@ -398,6 +424,10 @@ class GasGuidedCrackDetector(Node):
         move_cmd = Twist()
         avg_co2 = self.get_averaged_co2()
         
+        # E.O. 4.3: Start approach timer if not started
+        if self.approach_start_time is None:
+            self.approach_start_time = time.time()
+        
         # ============================================
         # SAMPLE AT POSITION A
         # ============================================
@@ -421,6 +451,11 @@ class GasGuidedCrackDetector(Node):
             move_cmd.angular.z = 0.0
             self.movement_pub.publish(move_cmd)
             self.linear_speed = MOVEMENT_STEP
+            
+            # E.O. 4.3: Track speeds used during approach
+            self.approach_speeds.append((self.linear_speed, self.angular_speed))
+            self.max_linear_speed_used = max(self.max_linear_speed_used, abs(self.linear_speed))
+            self.max_angular_speed_used = max(self.max_angular_speed_used, abs(self.angular_speed))
             
             # Wait for movement, then sample B
             if time.time() - self.step_start_time > 1.5:
@@ -501,7 +536,13 @@ class GasGuidedCrackDetector(Node):
         co2_elevated = position_data['co2'] > (self.baseline_co2 + CO2_DEVIATION_THRESHOLD)
         co2_high = position_data['co2'] >= CO2_HIGH_THRESHOLD
         
+        # E.O. 4.1: Track detection attempts
+        self.total_detection_attempts += 1
+        
         if crack_close and co2_elevated:
+            # E.O. 4.1: Successful confirmation (both sensors agree)
+            self.successful_confirmations += 1
+            
             self.get_logger().info("=" * 60)
             self.get_logger().info("🎯 TARGET CONFIRMATION CONDITIONS MET!")
             self.get_logger().info(f"   ✅ Crack detected at {position_data['crack_distance']:.1f} cm (≤ {STOPPING_DISTANCE_CM} cm)")
@@ -510,16 +551,30 @@ class GasGuidedCrackDetector(Node):
                 self.get_logger().info(f"   🔥 HIGH CO2 LEVEL - Likely leak source!")
             self.get_logger().info("=" * 60)
             
+            # E.O. 4.2: Record final stopping distance
+            self.actual_stopping_distance = position_data['crack_distance']
+            
+            # E.O. 4.3: Record approach duration
+            if self.approach_start_time:
+                self.approach_duration = time.time() - self.approach_start_time
+            
             self.confirmation_data = {
                 'crack_distance': position_data['crack_distance'],
                 'co2_level': position_data['co2'],
                 'timestamp': time.time(),
-                'co2_status': 'LEAK_CONFIRMED' if position_data['co2'] >= CO2_LEAK_CONFIRMED else ('HIGH' if co2_high else 'ELEVATED')
+                'co2_status': 'LEAK_CONFIRMED' if position_data['co2'] >= CO2_LEAK_CONFIRMED else ('HIGH' if co2_high else 'ELEVATED'),
+                'approach_duration': self.approach_duration
             }
             
             self.target_confirmed = True
             self.state = RobotState.TARGET_CONFIRMED
             return True
+        
+        # E.O. 4.1: Track partial matches (for analysis)
+        elif crack_close and not co2_elevated:
+            self.false_positives += 1  # Crack detected but no gas
+        elif co2_elevated and not crack_close:
+            self.false_negatives += 1  # Gas detected but no visible crack
         
         return False
 
@@ -693,12 +748,19 @@ class GasGuidedCrackDetector(Node):
             self.crack_detected = True
             self.crack_position = (best_crack['x'], best_crack['y'])
             
+            # E.O. 4.4: Track centering error (deviation from image center)
+            centering_error = best_crack['x'] - self.frame_center
+            self.centering_errors.append(abs(centering_error))
+            
             # Calculate distance if depth map available
             if self.last_depth_map is not None:
                 self.crack_distance = self.calculate_depth_at_point(
                     best_crack['x'], best_crack['y'], self.last_depth_map
                 )
                 self.estimated_distance = self.crack_distance
+                
+                # E.O. 4.2: Track distance estimates
+                self.distance_estimates.append(self.crack_distance)
 
     def calculate_depth_at_point(self, x, y, depth_map):
         """Calculate depth at a specific point"""
@@ -1104,6 +1166,154 @@ async def reset_benchmark():
         node.benchmark_start_time = time.time()
         return {"message": "Benchmark reset. Statistics cleared."}
     return {"message": "Node not initialized"}
+
+
+# ============================================
+# EXPECTED OUTPUTS ENDPOINT (for thesis)
+# ============================================
+
+@app.get("/expected_outputs")
+async def get_expected_outputs():
+    """
+    Get all Expected Output metrics for thesis documentation.
+    
+    Returns metrics for:
+    - E.O. 3.1: mAP and inference speed
+    - E.O. 4.1: Leak source identification accuracy
+    - E.O. 4.2: Distance estimation
+    - E.O. 4.3: Optimal linear and angular speed
+    - E.O. 4.4: Alignment deviation
+    """
+    if not node:
+        return {"message": "Node not initialized"}
+    
+    # Calculate statistics
+    yolo_times = list(node.yolo_times) if node.yolo_times else [0]
+    depth_times = list(node.depth_times) if node.depth_times else [0]
+    total_times = list(node.total_times) if node.total_times else [0]
+    fps_list = list(node.fps_history) if node.fps_history else [0]
+    distances = list(node.distance_estimates) if node.distance_estimates else [0]
+    errors = list(node.centering_errors) if node.centering_errors else [0]
+    speeds = list(node.approach_speeds) if node.approach_speeds else [(0, 0)]
+    
+    # Extract linear and angular speeds
+    linear_speeds = [s[0] for s in speeds]
+    angular_speeds = [s[1] for s in speeds]
+    
+    return {
+        "EO_3_1_performance_metrics": {
+            "description": "Mean Average Precision (mAP) and inference speed",
+            "mAP_from_training": {
+                "mAP_50_95": 0.8692,
+                "mAP_50": 0.9841,
+                "precision": 0.9799,
+                "recall": 0.9752,
+                "f1_score": 0.9775,
+                "note": "These values are from model training/evaluation on DGX"
+            },
+            "inference_speed_live": {
+                "yolo_world_xl_ms": {
+                    "mean": round(float(np.mean(yolo_times)), 2),
+                    "std": round(float(np.std(yolo_times)), 2),
+                    "for_paper": f"{np.mean(yolo_times):.2f} ± {np.std(yolo_times):.2f} ms"
+                },
+                "depth_anything_v2_ms": {
+                    "mean": round(float(np.mean(depth_times)), 2),
+                    "std": round(float(np.std(depth_times)), 2),
+                    "for_paper": f"{np.mean(depth_times):.2f} ± {np.std(depth_times):.2f} ms"
+                },
+                "total_pipeline_ms": {
+                    "mean": round(float(np.mean(total_times)), 2),
+                    "std": round(float(np.std(total_times)), 2),
+                    "for_paper": f"{np.mean(total_times):.2f} ± {np.std(total_times):.2f} ms"
+                },
+                "fps": {
+                    "mean": round(float(np.mean(fps_list)), 2),
+                    "std": round(float(np.std(fps_list)), 2),
+                    "for_paper": f"{np.mean(fps_list):.2f} ± {np.std(fps_list):.2f} FPS"
+                },
+                "samples_collected": len(yolo_times)
+            }
+        },
+        "EO_4_1_leak_source_accuracy": {
+            "description": "Accuracy of identifying the gas leak source",
+            "total_detection_attempts": node.total_detection_attempts,
+            "successful_confirmations": node.successful_confirmations,
+            "false_positives_crack_no_gas": node.false_positives,
+            "false_negatives_gas_no_crack": node.false_negatives,
+            "accuracy_percent": round(
+                (node.successful_confirmations / max(1, node.total_detection_attempts)) * 100, 2
+            ),
+            "target_confirmed": node.target_confirmed,
+            "confirmation_details": node.confirmation_data if node.target_confirmed else None
+        },
+        "EO_4_2_distance_estimation": {
+            "description": "Estimate distance between AUV and detected pipe cracks",
+            "distance_samples_cm": {
+                "mean": round(float(np.mean(distances)), 2),
+                "std": round(float(np.std(distances)), 2),
+                "min": round(float(np.min(distances)), 2),
+                "max": round(float(np.max(distances)), 2),
+                "for_paper": f"{np.mean(distances):.2f} ± {np.std(distances):.2f} cm"
+            },
+            "final_stopping_distance_cm": node.actual_stopping_distance,
+            "target_stopping_distance_cm": STOPPING_DISTANCE_CM,
+            "samples_collected": len(distances)
+        },
+        "EO_4_3_optimal_speed": {
+            "description": "Optimal linear and angular speed of AUV to approach cracks",
+            "configured_speeds": {
+                "linear_step_m_s": MOVEMENT_STEP,
+                "angular_step_rad_s": ROTATION_STEP
+            },
+            "actual_linear_speed_m_s": {
+                "mean": round(float(np.mean(linear_speeds)), 4),
+                "max_used": round(node.max_linear_speed_used, 4),
+                "for_paper": f"{np.mean(linear_speeds):.4f} m/s"
+            },
+            "actual_angular_speed_rad_s": {
+                "mean": round(float(np.mean(angular_speeds)), 4),
+                "max_used": round(node.max_angular_speed_used, 4),
+                "for_paper": f"{np.mean(angular_speeds):.4f} rad/s"
+            },
+            "approach_duration_sec": round(node.approach_duration, 2),
+            "speed_samples_collected": len(speeds)
+        },
+        "EO_4_4_alignment_deviation": {
+            "description": "Measured deviation between AUV and cracks based on pose",
+            "centering_error_pixels": {
+                "mean": round(float(np.mean(errors)), 2),
+                "std": round(float(np.std(errors)), 2),
+                "min": round(float(np.min(errors)), 2),
+                "max": round(float(np.max(errors)), 2),
+                "for_paper": f"{np.mean(errors):.2f} ± {np.std(errors):.2f} pixels"
+            },
+            "frame_center_pixel": node.frame_center,
+            "center_tolerance_pixels": node.center_tolerance,
+            "alignment_accuracy_percent": round(
+                (len([e for e in errors if e <= node.center_tolerance]) / max(1, len(errors))) * 100, 2
+            ),
+            "samples_collected": len(errors)
+        }
+    }
+
+
+@app.get("/expected_outputs/save")
+async def save_expected_outputs():
+    """Save all expected output metrics to a JSON file for thesis."""
+    import json
+    
+    # Get the data from the expected_outputs endpoint
+    data = await get_expected_outputs()
+    
+    if "message" in data:
+        return data
+    
+    filename = f"expected_outputs_{time.strftime('%Y%m%d_%H%M%S')}.json"
+    with open(filename, 'w') as f:
+        json.dump(data, f, indent=4)
+    
+    return {"message": f"Saved to {filename}", "data": data}
 
 
 def get_html_page():
